@@ -3,6 +3,7 @@ from sopel import plugin
 import os
 import json
 import logging
+import tempfile
 from .config import NotifySection
 from .defaults import DEFAULTS
 
@@ -15,13 +16,23 @@ def _build_logger():
     if logger.handlers:
         return logger
     logger.setLevel(logging.INFO)
-    handler = logging.FileHandler(PLUGIN_LOG_FILE)
+    try:
+        handler = logging.FileHandler(PLUGIN_LOG_FILE)
+    except Exception:
+        # Temporary fallback for testing when Sopel can't write in plugin dir.
+        fallback_log = os.path.join(tempfile.gettempdir(), "notify-debug.log")
+        try:
+            handler = logging.FileHandler(fallback_log)
+        except Exception:
+            logger.addHandler(logging.NullHandler())
+            return logger
     formatter = logging.Formatter(
         "%(asctime)s %(levelname)s [%(name)s] %(message)s"
     )
     handler.setFormatter(formatter)
     logger.addHandler(handler)
     logger.propagate = False
+    logger.info("notify logger initialized: %s", handler.baseFilename)
     return logger
 
 
