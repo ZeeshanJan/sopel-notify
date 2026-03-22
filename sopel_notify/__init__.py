@@ -35,6 +35,8 @@ def get_notify_channel(bot):
 
 def get_notify_target(bot):
     return bot.config.core.owner
+
+
 # -------------------
 # Event notifications
 # -------------------
@@ -98,8 +100,8 @@ def add_notify(bot, trigger):
         bot.say(f"{nick_to_add} is already being watched.", trigger.nick)
         return
     WATCHLIST.add(nick_to_add)
-    save_watchlist()
     bot.say(f"Added {nick_to_add} to watchlist.", trigger.nick)
+    save_watchlist()
 
 @plugin.commands('notify-del')
 @plugin.thread(True)
@@ -116,8 +118,8 @@ def del_notify(bot, trigger):
         bot.say(f"{nick_to_del} is not in watchlist.", trigger.nick)
         return
     WATCHLIST.remove(nick_to_del)
-    save_watchlist()
     bot.say(f"Removed {nick_to_del} from watchlist.", trigger.nick)
+    save_watchlist()
 
 @plugin.commands('notify-list')
 @plugin.thread(True)
