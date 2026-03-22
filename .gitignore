@@ -1,0 +1,5 @@
+sopel_notify/users.json
+
+sopel_notify.egg-info/
+sopel_notify/__pycache__/
+sopel_notify/notify-debug.log
