@@ -56,6 +56,7 @@ def _state(bot):
             "last_ison_poll": 0.0,
             "hostmasks": {},
             "pending_whois": {},
+            "recent_nick_changes": [],
         }
         bot.memory[STATE_KEY] = state
     return state
@@ -146,6 +147,38 @@ def _sync_watchlist_tracking(bot):
     if state["monitor_supported"] is True:
         _monitor_add(bot, WATCHLIST)
 
+
+def _record_nick_change(bot, old_nick, new_nick, ttl=30):
+    state = _state(bot)
+    expires = time.time() + ttl
+    changes = [c for c in state["recent_nick_changes"] if c["expires"] > time.time()]
+    changes.append({"old": old_nick, "new": new_nick, "expires": expires})
+    state["recent_nick_changes"] = changes
+
+
+def _filter_ison_transitions_with_nick_changes(bot, became_online, became_offline):
+    state = _state(bot)
+    now = time.time()
+    changes = [c for c in state["recent_nick_changes"] if c["expires"] > now]
+    state["recent_nick_changes"] = changes
+
+    online_filtered = set(became_online)
+    offline_filtered = set(became_offline)
+    for change in changes:
+        old_nick = change["old"]
+        new_nick = change["new"]
+        if old_nick in offline_filtered and new_nick in online_filtered:
+            offline_filtered.discard(old_nick)
+            online_filtered.discard(new_nick)
+            continue
+        # Also suppress one-sided transitions caused by nick changes.
+        if old_nick in offline_filtered:
+            offline_filtered.discard(old_nick)
+        if new_nick in online_filtered:
+            online_filtered.discard(new_nick)
+
+    return online_filtered, offline_filtered
+
 # Load watchlist from JSON file
 def load_watchlist():
     try:
@@ -181,6 +214,7 @@ def on_welcome(bot, trigger):
         state["ison_initialized"] = False
         state["online"].clear()
         state["pending_whois"].clear()
+        state["recent_nick_changes"].clear()
         if WATCHLIST:
             _monitor_add(bot, WATCHLIST)
         _request_ison(bot)
@@ -287,6 +321,11 @@ def on_ison_reply(bot, trigger):
 
         became_online = online_now - state["online"]
         became_offline = state["online"] - online_now
+        became_online, became_offline = _filter_ison_transitions_with_nick_changes(
+            bot,
+            became_online,
+            became_offline,
+        )
         for nick in sorted(became_online):
             _queue_whois_presence(bot, nick, True, "ISON+WHOIS")
         for nick in sorted(became_offline):
@@ -442,6 +481,17 @@ def on_nick_change(bot, trigger):
             return
         old_nick = trigger.nick.lower()
         new_nick = trigger.args[0].lower()
+        _record_nick_change(bot, old_nick, new_nick)
+
+        # Keep state aligned so periodic ISON doesn't report a false disconnect/connect pair.
+        state = _state(bot)
+        if old_nick in state["online"]:
+            state["online"].discard(old_nick)
+            if new_nick in WATCHLIST:
+                state["online"].add(new_nick)
+        if old_nick in state["hostmasks"]:
+            state["hostmasks"][new_nick] = state["hostmasks"].pop(old_nick)
+
         if old_nick in WATCHLIST or new_nick in WATCHLIST:
             stamp = _format_event_timestamp(trigger)
             mask = _format_hostmask(trigger)
