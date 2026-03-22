@@ -4,12 +4,14 @@ import os
 import json
 import logging
 import tempfile
+import time
 from datetime import datetime, timezone
 from .config import NotifySection
 from .defaults import DEFAULTS
 
 WATCHLIST_FILE = os.path.join(os.path.dirname(__file__), "users.json")
 PLUGIN_LOG_FILE = os.path.join(os.path.dirname(__file__), "notify-debug.log")
+STATE_KEY = "notify_watch_state"
 
 
 def _build_logger():
@@ -43,6 +45,72 @@ LOGGER = _build_logger()
 def _log_exception(context):
     LOGGER.exception("%s", context)
 
+
+def _state(bot):
+    state = bot.memory.get(STATE_KEY)
+    if state is None:
+        state = {
+            "monitor_supported": None,
+            "ison_initialized": False,
+            "online": set(),
+            "last_ison_poll": 0.0,
+        }
+        bot.memory[STATE_KEY] = state
+    return state
+
+
+def _chunked(items, size):
+    seq = list(items)
+    for i in range(0, len(seq), size):
+        yield seq[i:i + size]
+
+
+def _monitor_add(bot, nicks):
+    nick_list = [n for n in nicks if n]
+    for chunk in _chunked(nick_list, 20):
+        bot.write(("MONITOR", "+", ",".join(chunk)))
+
+
+def _monitor_del(bot, nicks):
+    nick_list = [n for n in nicks if n]
+    for chunk in _chunked(nick_list, 20):
+        bot.write(("MONITOR", "-", ",".join(chunk)))
+
+
+def _request_ison(bot):
+    if not WATCHLIST:
+        return
+    bot.write(("ISON", " ".join(sorted(WATCHLIST))))
+
+
+def _format_now():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
+def _notify_network_presence(bot, nick, hostmask, is_online, source):
+    watch_key = nick.lower()
+    if watch_key not in WATCHLIST:
+        return
+    if is_online and not _cfg_value(bot, "watch_online"):
+        return
+    if not is_online and not _cfg_value(bot, "watch_offline"):
+        return
+    action = "connected to the network" if is_online else "disconnected from the network"
+    stamp = _format_now()
+    mask = hostmask or f"{nick}!?@?"
+    bot.say(
+        f"[{stamp}] {nick} ({mask}) has {action} ({source}).",
+        get_notify_target(bot),
+    )
+
+
+def _sync_watchlist_tracking(bot):
+    state = _state(bot)
+    tracked_online = state["online"]
+    tracked_online.intersection_update(WATCHLIST)
+    if state["monitor_supported"] is True:
+        _monitor_add(bot, WATCHLIST)
+
 # Load watchlist from JSON file
 def load_watchlist():
     try:
@@ -66,6 +134,130 @@ WATCHLIST = load_watchlist()
 def setup(bot):
     bot.config.define_section('notify_watch', NotifySection)
     LOGGER.info("notify plugin setup completed")
+    _state(bot)
+
+
+@plugin.event("001")
+@plugin.rule(".*")
+def on_welcome(bot, trigger):
+    try:
+        LOGGER.info("network connected; initializing presence tracking")
+        state = _state(bot)
+        state["ison_initialized"] = False
+        state["online"].clear()
+        if WATCHLIST:
+            _monitor_add(bot, WATCHLIST)
+        _request_ison(bot)
+        state["last_ison_poll"] = time.time()
+    except Exception:
+        _log_exception("Presence initialization failed")
+
+
+@plugin.interval(15)
+def presence_poll(bot):
+    try:
+        state = _state(bot)
+        if state["monitor_supported"] is True:
+            return
+        interval = _cfg_value(bot, "ison_interval")
+        if not isinstance(interval, int):
+            interval = DEFAULTS["ison_interval"]
+        interval = max(15, interval)
+        now = time.time()
+        if now - state["last_ison_poll"] < interval:
+            return
+        state["last_ison_poll"] = now
+        _request_ison(bot)
+    except Exception:
+        _log_exception("ISON polling failed")
+
+
+@plugin.event("421")
+@plugin.rule(".*")
+def on_unknown_command(bot, trigger):
+    try:
+        args = [a.upper() for a in trigger.args]
+        if "MONITOR" in args:
+            state = _state(bot)
+            if state["monitor_supported"] is not False:
+                state["monitor_supported"] = False
+                LOGGER.info("MONITOR not supported by server; using ISON fallback")
+    except Exception:
+        _log_exception("MONITOR capability detection failed")
+
+
+def _parse_monitor_list(raw):
+    if not raw:
+        return []
+    cleaned = raw.lstrip(":")
+    return [item for item in cleaned.split(",") if item]
+
+
+@plugin.event("730")
+@plugin.rule(".*")
+def on_monitor_online(bot, trigger):
+    try:
+        state = _state(bot)
+        state["monitor_supported"] = True
+        entries = _parse_monitor_list(trigger.args[-1] if trigger.args else "")
+        for entry in entries:
+            nick = entry.split("!", 1)[0]
+            key = nick.lower()
+            if key not in WATCHLIST:
+                continue
+            if key in state["online"]:
+                continue
+            state["online"].add(key)
+            _notify_network_presence(bot, nick, entry, True, "MONITOR")
+    except Exception:
+        _log_exception("MONITOR online handler failed")
+
+
+@plugin.event("731")
+@plugin.rule(".*")
+def on_monitor_offline(bot, trigger):
+    try:
+        state = _state(bot)
+        state["monitor_supported"] = True
+        entries = _parse_monitor_list(trigger.args[-1] if trigger.args else "")
+        for entry in entries:
+            nick = entry.split("!", 1)[0]
+            key = nick.lower()
+            if key not in WATCHLIST:
+                continue
+            if key not in state["online"]:
+                continue
+            state["online"].discard(key)
+            _notify_network_presence(bot, nick, None, False, "MONITOR")
+    except Exception:
+        _log_exception("MONITOR offline handler failed")
+
+
+@plugin.event("303")
+@plugin.rule(".*")
+def on_ison_reply(bot, trigger):
+    try:
+        state = _state(bot)
+        if state["monitor_supported"] is True:
+            return
+        payload = (trigger.args[-1] if trigger.args else "").lstrip(":")
+        online_now = set(n.lower() for n in payload.split() if n)
+        online_now.intersection_update(WATCHLIST)
+        if not state["ison_initialized"]:
+            state["online"] = set(online_now)
+            state["ison_initialized"] = True
+            LOGGER.info("ISON baseline captured: %d online", len(online_now))
+            return
+
+        became_online = online_now - state["online"]
+        became_offline = state["online"] - online_now
+        for nick in sorted(became_online):
+            _notify_network_presence(bot, nick, None, True, "ISON")
+        for nick in sorted(became_offline):
+            _notify_network_presence(bot, nick, None, False, "ISON")
+        state["online"] = online_now
+    except Exception:
+        _log_exception("ISON reply handler failed")
 
 
 def _cfg_value(bot, name):
@@ -143,6 +335,9 @@ def on_part(bot, trigger):
 @plugin.rule('.*')
 def on_quit(bot, trigger):
     try:
+        state = _state(bot)
+        if state["monitor_supported"] is True or state["ison_initialized"]:
+            return
         if not _cfg_value(bot, "watch_offline"):
             return
         nick = trigger.nick.lower()
@@ -201,6 +396,8 @@ def add_notify(bot, trigger):
         WATCHLIST.add(nick_to_add)
         bot.say(f"Added {nick_to_add} to watchlist.", trigger.nick)
         save_watchlist()
+        _sync_watchlist_tracking(bot)
+        _request_ison(bot)
         LOGGER.info("notify-add success nick=%s", nick_to_add)
     except Exception:
         _log_exception("notify-add command failed")
@@ -224,6 +421,11 @@ def del_notify(bot, trigger):
         WATCHLIST.remove(nick_to_del)
         bot.say(f"Removed {nick_to_del} from watchlist.", trigger.nick)
         save_watchlist()
+        state = _state(bot)
+        state["online"].discard(nick_to_del)
+        if state["monitor_supported"] is True:
+            _monitor_del(bot, [nick_to_del])
+        _request_ison(bot)
         LOGGER.info("notify-del success nick=%s", nick_to_del)
     except Exception:
         _log_exception("notify-del command failed")
