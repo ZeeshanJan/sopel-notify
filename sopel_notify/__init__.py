@@ -63,7 +63,7 @@ WATCHLIST = load_watchlist()
 
 
 def setup(bot):
-    bot.config.define_section('notify_watch', NotifySection, require_extra=False)
+    bot.config.define_section('notify_watch', NotifySection)
     LOGGER.info("notify plugin setup completed")
 
 
