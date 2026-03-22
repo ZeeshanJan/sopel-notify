@@ -1,7 +1,8 @@
 # sopel_notify/__init__.py
-from sopel import module
+from sopel import plugin
 import os
 import json
+from .config import NotifySection
 from .defaults import DEFAULTS
 
 WATCHLIST_FILE = os.path.join(os.path.dirname(__file__), "users.json")
@@ -22,63 +23,68 @@ def save_watchlist():
 
 WATCHLIST = load_watchlist()
 
+
+def setup(bot):
+    bot.config.define_section('notify', NotifySection, require_extra=False)
+
+
 # Helper: get channel for notifications
 def get_notify_channel(bot):
     return getattr(bot.config.notify, "notify_channel", DEFAULTS["notify_channel"])
 
 
-def get_notify_target(bot, trigger):
-    # Send to PM to owner/admin instead of a channel
-    owner = bot.config.core.owner
-    return owner
+def get_notify_target(bot):
+    return bot.config.core.owner
 # -------------------
 # Event notifications
 # -------------------
-@module.event('JOIN')
-@module.rule('.*')
+@plugin.event('JOIN')
+@plugin.rule('.*')
 def on_join(bot, trigger):
     if not getattr(bot.config.notify, "watch_online", DEFAULTS["watch_online"]):
         return
     nick = trigger.nick.lower()
     if nick in WATCHLIST:
-        bot.say(f"{trigger.nick} has joined the network!", get_notify_target(bot, trigger))
+        bot.say(f"{trigger.nick} has joined {trigger.sender}!", get_notify_target(bot))
 
-@module.event('PART')
-@module.rule('.*')
+@plugin.event('PART')
+@plugin.rule('.*')
 def on_part(bot, trigger):
     if not getattr(bot.config.notify, "watch_offline", DEFAULTS["watch_offline"]):
         return
     nick = trigger.nick.lower()
     if nick in WATCHLIST:
-        bot.say(f"{trigger.nick} has left the network!", get_notify_target(bot, trigger))
+        bot.say(f"{trigger.nick} has left {trigger.sender}!", get_notify_target(bot))
 
-@module.event('QUIT')
-@module.rule('.*')
+@plugin.event('QUIT')
+@plugin.rule('.*')
 def on_quit(bot, trigger):
     if not getattr(bot.config.notify, "watch_offline", DEFAULTS["watch_offline"]):
         return
     nick = trigger.nick.lower()
     if nick in WATCHLIST:
-        bot.say(f"{trigger.nick} has quit the network!", get_notify_target(bot, trigger))
+        bot.say(f"{trigger.nick} has quit the network!", get_notify_target(bot))
 
-@module.event('NICK')
-@module.rule('.*')
+@plugin.event('NICK')
+@plugin.rule('.*')
 def on_nick_change(bot, trigger):
     if not getattr(bot.config.notify, "watch_nickchange", DEFAULTS["watch_nickchange"]):
         return
     old_nick = trigger.nick.lower()
-    new_nick = trigger.group(1).lower() if trigger.group(1) else trigger.args[0].lower()
+    new_nick = trigger.args[0].lower()
     if old_nick in WATCHLIST or new_nick in WATCHLIST:
-        bot.say(f"{trigger.nick} changed nick to {trigger.args[0]}", get_notify_target(bot, trigger))
+        bot.say(f"{trigger.nick} changed nick to {trigger.args[0]}", get_notify_target(bot))
 
 # -------------------
 # Admin commands
 # -------------------
 def is_admin(bot, nick):
-    return nick.lower() in (admin.lower() for admin in bot.config.core.admins)
+    owner = bot.config.core.owner
+    admins = bot.config.core.admins or []
+    return nick.lower() == owner.lower() or nick.lower() in (a.lower() for a in admins)
 
-@module.commands('notify-add')
-@module.thread(True)
+@plugin.commands('notify-add')
+@plugin.thread(True)
 def add_notify(bot, trigger):
     if not is_admin(bot, trigger.nick):
         bot.say("You are not authorized to use this command.", trigger.nick)
@@ -95,8 +101,8 @@ def add_notify(bot, trigger):
     save_watchlist()
     bot.say(f"Added {nick_to_add} to watchlist.", trigger.nick)
 
-@module.commands('notify-del')
-@module.thread(True)
+@plugin.commands('notify-del')
+@plugin.thread(True)
 def del_notify(bot, trigger):
     if not is_admin(bot, trigger.nick):
         bot.say("You are not authorized to use this command.", trigger.nick)
@@ -113,8 +119,8 @@ def del_notify(bot, trigger):
     save_watchlist()
     bot.say(f"Removed {nick_to_del} from watchlist.", trigger.nick)
 
-@module.commands('notify-list')
-@module.thread(True)
+@plugin.commands('notify-list')
+@plugin.thread(True)
 def list_notify(bot, trigger):
     if not is_admin(bot, trigger.nick):
         bot.say("You are not authorized to use this command.", trigger.nick)
