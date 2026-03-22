@@ -4,5 +4,6 @@ DEFAULTS = {
     "notify_channel": "#example",
     "watch_online": True,
     "watch_offline": True,
-    "watch_nickchange": True
+    "watch_nickchange": True,
+    "ison_interval": 120
 }
