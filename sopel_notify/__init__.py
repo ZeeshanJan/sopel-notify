@@ -54,6 +54,8 @@ def _state(bot):
             "ison_initialized": False,
             "online": set(),
             "last_ison_poll": 0.0,
+            "hostmasks": {},
+            "pending_whois": {},
         }
         bot.memory[STATE_KEY] = state
     return state
@@ -104,6 +106,39 @@ def _notify_network_presence(bot, nick, hostmask, is_online, source):
     )
 
 
+def _queue_whois_presence(bot, nick, is_online, source, fallback_hostmask=None):
+    state = _state(bot)
+    key = nick.lower()
+    state["pending_whois"][key] = {
+        "nick": nick,
+        "is_online": is_online,
+        "source": source,
+        "fallback_hostmask": fallback_hostmask,
+    }
+    bot.write(("WHOIS", nick))
+
+
+def _flush_pending_whois(bot, nick, hostmask=None):
+    state = _state(bot)
+    key = nick.lower()
+    pending = state["pending_whois"].pop(key, None)
+    if not pending:
+        return
+    if hostmask:
+        state["hostmasks"][key] = hostmask
+    fallback_mask = pending.get("fallback_hostmask")
+    cached_mask = hostmask or state["hostmasks"].get(key) or fallback_mask
+    if fallback_mask and key not in state["hostmasks"]:
+        state["hostmasks"][key] = fallback_mask
+    _notify_network_presence(
+        bot,
+        pending["nick"],
+        cached_mask,
+        pending["is_online"],
+        pending["source"],
+    )
+
+
 def _sync_watchlist_tracking(bot):
     state = _state(bot)
     tracked_online = state["online"]
@@ -145,6 +180,7 @@ def on_welcome(bot, trigger):
         state = _state(bot)
         state["ison_initialized"] = False
         state["online"].clear()
+        state["pending_whois"].clear()
         if WATCHLIST:
             _monitor_add(bot, WATCHLIST)
         _request_ison(bot)
@@ -208,7 +244,7 @@ def on_monitor_online(bot, trigger):
             if key in state["online"]:
                 continue
             state["online"].add(key)
-            _notify_network_presence(bot, nick, entry, True, "MONITOR")
+            _queue_whois_presence(bot, nick, True, "MONITOR+WHOIS", entry)
     except Exception:
         _log_exception("MONITOR online handler failed")
 
@@ -252,12 +288,59 @@ def on_ison_reply(bot, trigger):
         became_online = online_now - state["online"]
         became_offline = state["online"] - online_now
         for nick in sorted(became_online):
-            _notify_network_presence(bot, nick, None, True, "ISON")
+            _queue_whois_presence(bot, nick, True, "ISON+WHOIS")
         for nick in sorted(became_offline):
-            _notify_network_presence(bot, nick, None, False, "ISON")
+            _notify_network_presence(
+                bot,
+                nick,
+                state["hostmasks"].get(nick),
+                False,
+                "ISON",
+            )
         state["online"] = online_now
     except Exception:
         _log_exception("ISON reply handler failed")
+
+
+@plugin.event("311")
+@plugin.rule(".*")
+def on_whois_user(bot, trigger):
+    try:
+        # 311 <me> <nick> <user> <host> * :<realname>
+        if len(trigger.args) < 5:
+            return
+        nick = trigger.args[1]
+        user = trigger.args[2]
+        host = trigger.args[3]
+        _flush_pending_whois(bot, nick, f"{nick}!{user}@{host}")
+    except Exception:
+        _log_exception("WHOIS user handler failed")
+
+
+@plugin.event("318")
+@plugin.rule(".*")
+def on_whois_end(bot, trigger):
+    try:
+        # 318 <me> <nick> :End of /WHOIS list.
+        if len(trigger.args) < 2:
+            return
+        nick = trigger.args[1]
+        _flush_pending_whois(bot, nick)
+    except Exception:
+        _log_exception("WHOIS end handler failed")
+
+
+@plugin.event("401")
+@plugin.rule(".*")
+def on_no_such_nick(bot, trigger):
+    try:
+        # 401 <me> <nick> :No such nick/channel
+        if len(trigger.args) < 2:
+            return
+        nick = trigger.args[1]
+        _flush_pending_whois(bot, nick)
+    except Exception:
+        _log_exception("WHOIS no-such-nick handler failed")
 
 
 def _cfg_value(bot, name):
