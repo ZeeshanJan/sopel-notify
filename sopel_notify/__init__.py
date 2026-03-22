@@ -4,6 +4,7 @@ import os
 import json
 import logging
 import tempfile
+from datetime import datetime, timezone
 from .config import NotifySection
 from .defaults import DEFAULTS
 
@@ -85,6 +86,22 @@ def get_notify_target(bot):
     return bot.config.core.owner
 
 
+def _format_event_timestamp(trigger):
+    event_time = getattr(trigger, "time", None)
+    if event_time is None:
+        event_time = datetime.now(timezone.utc)
+    return event_time.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
+def _format_hostmask(trigger):
+    hostmask = getattr(trigger, "hostmask", None)
+    if hostmask:
+        return hostmask
+    user = getattr(trigger, "user", None) or "?"
+    host = getattr(trigger, "host", None) or "?"
+    return f"{trigger.nick}!{user}@{host}"
+
+
 # -------------------
 # Event notifications
 # -------------------
@@ -96,7 +113,12 @@ def on_join(bot, trigger):
             return
         nick = trigger.nick.lower()
         if nick in WATCHLIST:
-            bot.say(f"{trigger.nick} has joined {trigger.sender}!", get_notify_target(bot))
+            stamp = _format_event_timestamp(trigger)
+            mask = _format_hostmask(trigger)
+            bot.say(
+                f"[{stamp}] {trigger.nick} ({mask}) has joined {trigger.sender}.",
+                get_notify_target(bot),
+            )
     except Exception:
         _log_exception("JOIN handler failed")
 
@@ -108,7 +130,12 @@ def on_part(bot, trigger):
             return
         nick = trigger.nick.lower()
         if nick in WATCHLIST:
-            bot.say(f"{trigger.nick} has left {trigger.sender}!", get_notify_target(bot))
+            stamp = _format_event_timestamp(trigger)
+            mask = _format_hostmask(trigger)
+            bot.say(
+                f"[{stamp}] {trigger.nick} ({mask}) has left {trigger.sender}.",
+                get_notify_target(bot),
+            )
     except Exception:
         _log_exception("PART handler failed")
 
@@ -120,7 +147,12 @@ def on_quit(bot, trigger):
             return
         nick = trigger.nick.lower()
         if nick in WATCHLIST:
-            bot.say(f"{trigger.nick} has quit the network!", get_notify_target(bot))
+            stamp = _format_event_timestamp(trigger)
+            mask = _format_hostmask(trigger)
+            bot.say(
+                f"[{stamp}] {trigger.nick} ({mask}) has disconnected from the network.",
+                get_notify_target(bot),
+            )
     except Exception:
         _log_exception("QUIT handler failed")
 
@@ -133,7 +165,12 @@ def on_nick_change(bot, trigger):
         old_nick = trigger.nick.lower()
         new_nick = trigger.args[0].lower()
         if old_nick in WATCHLIST or new_nick in WATCHLIST:
-            bot.say(f"{trigger.nick} changed nick to {trigger.args[0]}", get_notify_target(bot))
+            stamp = _format_event_timestamp(trigger)
+            mask = _format_hostmask(trigger)
+            bot.say(
+                f"[{stamp}] {trigger.nick} ({mask}) changed nick to {trigger.args[0]}.",
+                get_notify_target(bot),
+            )
     except Exception:
         _log_exception("NICK handler failed")
 
