@@ -4,8 +4,7 @@ import os
 import json
 from .defaults import DEFAULTS
 
-# Store watchlist in Sopel's home directory
-WATCHLIST_FILE = os.path.join(os.path.expanduser("~/.sopel"), "sopel_notify_users.json")
+WATCHLIST_FILE = os.path.join(os.path.dirname(__file__), "users.json")
 
 # Load watchlist from JSON file
 def load_watchlist():
