@@ -63,13 +63,22 @@ WATCHLIST = load_watchlist()
 
 
 def setup(bot):
-    bot.config.define_section('notify', NotifySection, require_extra=False)
+    bot.config.define_section('notify_watch', NotifySection, require_extra=False)
     LOGGER.info("notify plugin setup completed")
+
+
+def _cfg_value(bot, name):
+    cfg = getattr(bot.config, "notify_watch", None)
+    if cfg is None:
+        cfg = getattr(bot.config, "notify", None)
+    if cfg is None:
+        return DEFAULTS[name]
+    return getattr(cfg, name, DEFAULTS[name])
 
 
 # Helper: get channel for notifications
 def get_notify_channel(bot):
-    return getattr(bot.config.notify, "notify_channel", DEFAULTS["notify_channel"])
+    return _cfg_value(bot, "notify_channel")
 
 
 def get_notify_target(bot):
@@ -83,7 +92,7 @@ def get_notify_target(bot):
 @plugin.rule('.*')
 def on_join(bot, trigger):
     try:
-        if not getattr(bot.config.notify, "watch_online", DEFAULTS["watch_online"]):
+        if not _cfg_value(bot, "watch_online"):
             return
         nick = trigger.nick.lower()
         if nick in WATCHLIST:
@@ -95,7 +104,7 @@ def on_join(bot, trigger):
 @plugin.rule('.*')
 def on_part(bot, trigger):
     try:
-        if not getattr(bot.config.notify, "watch_offline", DEFAULTS["watch_offline"]):
+        if not _cfg_value(bot, "watch_offline"):
             return
         nick = trigger.nick.lower()
         if nick in WATCHLIST:
@@ -107,7 +116,7 @@ def on_part(bot, trigger):
 @plugin.rule('.*')
 def on_quit(bot, trigger):
     try:
-        if not getattr(bot.config.notify, "watch_offline", DEFAULTS["watch_offline"]):
+        if not _cfg_value(bot, "watch_offline"):
             return
         nick = trigger.nick.lower()
         if nick in WATCHLIST:
@@ -119,7 +128,7 @@ def on_quit(bot, trigger):
 @plugin.rule('.*')
 def on_nick_change(bot, trigger):
     try:
-        if not getattr(bot.config.notify, "watch_nickchange", DEFAULTS["watch_nickchange"]):
+        if not _cfg_value(bot, "watch_nickchange"):
             return
         old_nick = trigger.nick.lower()
         new_nick = trigger.args[0].lower()
