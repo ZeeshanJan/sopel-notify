@@ -1,45 +1,44 @@
 # sopel_notify/__init__.py
+"""Tell the owner when watched nicks come online, go offline or change nick.
+
+The watchlist is kept in the bot's database (table notify_watchlist); log
+lines go to the bot's own log.
+"""
 from sopel import plugin
+from sopel.tools import get_logger
 import os
 import json
 import logging
-import tempfile
+import shutil
 import time
 from datetime import datetime, timezone
+from sqlalchemy import Column, Integer, MetaData, String, Table, delete, insert, select
+from sqlalchemy.exc import SQLAlchemyError
 from .config import NotifySection
 from .defaults import DEFAULTS
 
-WATCHLIST_FILE = os.path.join(os.path.dirname(__file__), "users.json")
-PLUGIN_LOG_FILE = os.path.join(os.path.dirname(__file__), "notify-debug.log")
 STATE_KEY = "notify_watch_state"
+LOGGER = get_logger("notify")  # goes to the bot's own log
 
+# Older versions wrote to their own file through the "sopel_notify" logger;
+# logging keeps loggers across plugin reloads, so close that file here.
+_old = logging.getLogger("sopel_notify")
+for _handler in list(_old.handlers):
+    _old.removeHandler(_handler)
+    _handler.close()
 
-def _build_logger():
-    logger = logging.getLogger("sopel_notify")
-    if logger.handlers:
-        return logger
-    logger.setLevel(logging.INFO)
-    try:
-        handler = logging.FileHandler(PLUGIN_LOG_FILE)
-    except Exception:
-        # Temporary fallback for testing when Sopel can't write in plugin dir.
-        fallback_log = os.path.join(tempfile.gettempdir(), "notify-debug.log")
-        try:
-            handler = logging.FileHandler(fallback_log)
-        except Exception:
-            logger.addHandler(logging.NullHandler())
-            return logger
-    formatter = logging.Formatter(
-        "%(asctime)s %(levelname)s [%(name)s] %(message)s"
-    )
-    handler.setFormatter(formatter)
-    logger.addHandler(handler)
-    logger.propagate = False
-    logger.info("notify logger initialized: %s", handler.baseFilename)
-    return logger
+metadata = MetaData()
+watchlist_table = Table(
+    "notify_watchlist", metadata,
+    Column("nick", String(64), primary_key=True),
+    Column("added_at", Integer, nullable=False),
+)
 
-
-LOGGER = _build_logger()
+# Files the plugin used to keep in its own folder; imported once, then moved
+# to <bot home>/backups/sopel-notify/.
+PLUGIN_DIR = os.path.dirname(__file__)
+LEGACY_WATCHLIST = os.path.join(PLUGIN_DIR, "users.json")
+LEGACY_LOG = os.path.join(PLUGIN_DIR, "notify-debug.log")
 
 
 def _log_exception(context):
@@ -179,29 +178,64 @@ def _filter_ison_transitions_with_nick_changes(bot, became_online, became_offlin
 
     return online_filtered, offline_filtered
 
-# Load watchlist from JSON file
-def load_watchlist():
-    try:
-        if os.path.exists(WATCHLIST_FILE):
-            with open(WATCHLIST_FILE, "r") as f:
-                data = json.load(f)
-                return set(user.lower() for user in data.get("users", []))
-    except Exception:
-        _log_exception("Failed to load watchlist")
-    return set()
+WATCHLIST = set()  # lower-case nicks, loaded from the database in setup()
 
-# Save watchlist to JSON file
-def save_watchlist():
-    data = {"users": list(WATCHLIST)}
-    with open(WATCHLIST_FILE, "w") as f:
-        json.dump(data, f, indent=2)
 
-WATCHLIST = load_watchlist()
+def load_watchlist(bot):
+    with bot.db.engine.connect() as conn:
+        nicks = {row[0] for row in conn.execute(select(watchlist_table.c.nick))}
+    WATCHLIST.clear()
+    WATCHLIST.update(nicks)
+
+
+def add_to_watchlist(bot, nick):
+    with bot.db.engine.begin() as conn:
+        conn.execute(insert(watchlist_table).values(nick=nick, added_at=int(time.time())))
+    WATCHLIST.add(nick)
+
+
+def remove_from_watchlist(bot, nick):
+    with bot.db.engine.begin() as conn:
+        conn.execute(delete(watchlist_table).where(watchlist_table.c.nick == nick))
+    WATCHLIST.discard(nick)
+
+
+def _move_to_backups(bot, path):
+    folder = os.path.join(bot.config.core.homedir, "backups", "sopel-notify")
+    os.makedirs(folder, exist_ok=True)
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    shutil.move(path, os.path.join(folder, f"{os.path.basename(path)}.{stamp}"))
+
+
+def migrate_legacy_files(bot):
+    """Import users.json once (only into an empty watchlist), then move the old files away."""
+    if os.path.isfile(LEGACY_WATCHLIST):
+        try:
+            with open(LEGACY_WATCHLIST, encoding="utf-8") as f:
+                nicks = {str(n).lower() for n in json.load(f).get("users", [])}
+            with bot.db.engine.begin() as conn:
+                if conn.execute(select(watchlist_table).limit(1)).first():
+                    LOGGER.warning("notify: users.json not imported, the database already has a watchlist")
+                elif nicks:
+                    now = int(time.time())
+                    conn.execute(insert(watchlist_table), [{"nick": n, "added_at": now} for n in sorted(nicks)])
+                    LOGGER.info("notify: imported %d nicks from users.json", len(nicks))
+            _move_to_backups(bot, LEGACY_WATCHLIST)
+        except (OSError, ValueError, AttributeError, SQLAlchemyError):
+            LOGGER.exception("notify: could not import users.json")
+    if os.path.isfile(LEGACY_LOG):
+        try:
+            _move_to_backups(bot, LEGACY_LOG)
+        except OSError:
+            LOGGER.exception("notify: could not move the old debug log")
 
 
 def setup(bot):
     bot.config.define_section('notify_watch', NotifySection)
-    LOGGER.info("notify plugin setup completed")
+    metadata.create_all(bot.db.engine)
+    migrate_legacy_files(bot)
+    load_watchlist(bot)
+    LOGGER.info("notify plugin setup completed (%d nicks watched)", len(WATCHLIST))
     _state(bot)
 
 
@@ -526,9 +560,8 @@ def add_notify(bot, trigger):
         if nick_to_add in WATCHLIST:
             bot.say(f"{nick_to_add} is already being watched.", trigger.nick)
             return
-        WATCHLIST.add(nick_to_add)
+        add_to_watchlist(bot, nick_to_add)
         bot.say(f"Added {nick_to_add} to watchlist.", trigger.nick)
-        save_watchlist()
         _sync_watchlist_tracking(bot)
         _request_ison(bot)
         LOGGER.info("notify-add success nick=%s", nick_to_add)
@@ -551,9 +584,8 @@ def del_notify(bot, trigger):
         if nick_to_del not in WATCHLIST:
             bot.say(f"{nick_to_del} is not in watchlist.", trigger.nick)
             return
-        WATCHLIST.remove(nick_to_del)
+        remove_from_watchlist(bot, nick_to_del)
         bot.say(f"Removed {nick_to_del} from watchlist.", trigger.nick)
-        save_watchlist()
         state = _state(bot)
         state["online"].discard(nick_to_del)
         if state["monitor_supported"] is True:
